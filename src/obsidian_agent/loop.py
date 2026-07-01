@@ -3,6 +3,7 @@ with plain text instead of another tool call, instead of stopping after
 one round. Now with streaming output and slash commands."""
 
 import json
+import os
 from contextlib import AsyncExitStack
 
 from mcp import ClientSession
@@ -96,8 +97,13 @@ async def main_loop(config: dict):
     # function returns — every tool call after that would silently fail.
     async with AsyncExitStack() as stack:
         with ui.console.status("[dim]starting obsidian-mcp...[/]"):
+            # Redirect the subprocess's stderr to devnull so its own log
+            # lines (fastmcp INFO logs, authlib deprecation warnings)
+            # don't interleave with our Rich output. A plain sync file
+            # object is fine here — errlog just needs to be file-like.
+            devnull = stack.enter_context(open(os.devnull, "w"))
             read_stream, write_stream = await stack.enter_async_context(
-                stdio_client(server_params)
+                stdio_client(server_params, errlog=devnull)
             )
             session = await stack.enter_async_context(
                 ClientSession(read_stream, write_stream)
@@ -116,7 +122,8 @@ async def main_loop(config: dict):
 
         while True:
             try:
-                user_input = ui.console.input("[bold blue]You[/] ")
+                ui.print_turn_separator()
+                user_input = ui.prompt_user()
             except (EOFError, KeyboardInterrupt):
                 ui.console.print("\n[dim]Goodbye.[/]")
                 break

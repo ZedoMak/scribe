@@ -8,6 +8,7 @@ from rich.panel import Panel
 from rich.spinner import Spinner
 from rich.live import Live
 from rich.text import Text
+from rich.rule import Rule
 
 console = Console()
 
@@ -58,8 +59,9 @@ def print_tool_call(name: str, arguments: dict):
 
 
 def print_agent_reply(text: str):
-    console.print("[bold green]Agent[/]")
-    console.print(Markdown(text or "*(no response)*"))
+    console.print()
+    console.print("[bold magenta]◆ agent[/]")
+    console.print(Markdown(text or "*(no response)*"), style="")
     console.print()
 
 
@@ -70,3 +72,9 @@ def print_error(message: str):
 def thinking_spinner():
     """Returns a context-manager Live spinner; use with `with thinking_spinner():`."""
     return Live(Spinner("dots", text=Text(" thinking...", style="dim")), console=console, refresh_per_second=10, transient=True)
+
+def print_turn_separator():
+    console.print(Rule(style="dim"))
+
+def prompt_user() -> str:
+    return console.input("[bold cyan]❯[/] ")

@@ -27,6 +27,9 @@ def build_server_params(vault_path: str) -> StdioServerParameters:
         env={
             **os.environ,
             "OBSIDIAN_VAULT_PATH": vault_path,
+            # Quiet the server's own logging; we only want MCP protocol
+            # traffic on stdio, not its log lines colliding with our UI.
+            "OBSIDIAN_LOG_LEVEL": "ERROR",
         },
     )
 
