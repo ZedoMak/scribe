@@ -1,35 +1,38 @@
-"""The agentic chat loop: keeps calling tools until the model responds
-with plain text instead of another tool call, instead of stopping after
-one round. Now with streaming output and slash commands."""
+"""The agentic chat loop and one-shot task runner. Both share the same
+connection setup and tool-calling turn logic — the only difference is
+whether we loop on user input afterward (chat) or exit after one task
+(one-shot)."""
 
 import json
-import os
 from contextlib import AsyncExitStack
-
-from mcp import ClientSession
-from mcp.client.stdio import stdio_client
 
 from . import ui
 from .core import (
     SYSTEM_PROMPT,
     build_llm_client,
-    build_server_params,
-    convert_mcp_tool_to_openai,
+    connect_session,
     execute_tool_call,
 )
 
-MAX_STEPS = 8
+# Interactive chat and one-shot tasks get different budgets: a single
+# one-shot command like "reorganize my Projects folder" can legitimately
+# need many more tool calls than a chat turn answering one question.
+MAX_STEPS_CHAT = 10
+MAX_STEPS_ONE_SHOT = 25
+
 EXTRA_HEADERS = {
     "HTTP-Referer": "http://localhost:8080",
     "X-Title": "Obsidian Agent",
 }
 
 
-async def run_turn(client_llm, model, messages, tools, session, max_steps=MAX_STEPS):
+async def run_turn(client_llm, model, messages, tools, session, max_steps):
     """Keep calling tools, feeding results back to the model, until it
     responds with plain text instead of another tool call, or the step
     budget runs out."""
-    for _ in range(max_steps):
+    seen_calls = {}  # signature -> result, so we can catch loops
+
+    for step in range(max_steps):
         with ui.thinking_spinner():
             response = client_llm.chat.completions.create(
                 model=model,
@@ -50,12 +53,23 @@ async def run_turn(client_llm, model, messages, tools, session, max_steps=MAX_ST
                 args = json.loads(tool_call.function.arguments)
             except json.JSONDecodeError:
                 result_text = "Error: malformed tool arguments"
-                args = {}
             else:
-                ui.print_tool_call(tool_call.function.name, args)
-                result_text = await execute_tool_call(
-                    tool_call.function.name, args, session
-                )
+                signature = (tool_call.function.name, json.dumps(args, sort_keys=True))
+                if signature in seen_calls:
+                    result_text = (
+                        "You already called this exact tool with these exact "
+                        "arguments earlier in this task. Re-running it will "
+                        "give the same result. Stop retrying it — either use "
+                        "the earlier result, try a different approach, or if "
+                        "this file/path seems to no longer exist or be "
+                        "reachable, skip it and move on to the rest of the task."
+                    )
+                else:
+                    ui.print_tool_call(tool_call.function.name, args)
+                    result_text = await execute_tool_call(
+                        tool_call.function.name, args, session
+                    )
+                    seen_calls[signature] = result_text
             messages.append(
                 {
                     "role": "tool",
@@ -64,7 +78,10 @@ async def run_turn(client_llm, model, messages, tools, session, max_steps=MAX_ST
                 }
             )
 
-    return "Stopped after too many steps — the task may be more complex than expected."
+    return (
+        f"Stopped after {max_steps} steps — this task may need breaking "
+        "into smaller pieces, or run it again to continue from here."
+    )
 
 
 def handle_slash_command(command: str, messages: list, tools: list, system_prompt: str) -> bool:
@@ -84,40 +101,17 @@ def handle_slash_command(command: str, messages: list, tools: list, system_promp
 
 
 async def main_loop(config: dict):
+    """Interactive chat: keeps the vault connection open across many
+    turns, and loops on user input until they exit."""
     vault_path = config["vault_path"]
     model = config["model"]
-    api_key = config["openrouter_api_key"]
+    client_llm = build_llm_client(config["openrouter_api_key"])
 
-    client_llm = build_llm_client(api_key)
-    server_params = build_server_params(vault_path)
-
-    # AsyncExitStack keeps the stdio subprocess and MCP session alive for
-    # the whole chat loop. Returning a session from inside a narrower
-    # "async with" block would close the connection the moment that
-    # function returns — every tool call after that would silently fail.
     async with AsyncExitStack() as stack:
         with ui.console.status("[dim]starting obsidian-mcp...[/]"):
-            # Redirect the subprocess's stderr to devnull so its own log
-            # lines (fastmcp INFO logs, authlib deprecation warnings)
-            # don't interleave with our Rich output. A plain sync file
-            # object is fine here — errlog just needs to be file-like.
-            devnull = stack.enter_context(open(os.devnull, "w"))
-            read_stream, write_stream = await stack.enter_async_context(
-                stdio_client(server_params, errlog=devnull)
-            )
-            session = await stack.enter_async_context(
-                ClientSession(read_stream, write_stream)
-            )
-            await session.initialize()
-            tools_result = await session.list_tools()
+            session, openai_tools = await connect_session(stack, vault_path)
 
-        if not tools_result.tools:
-            ui.print_error("No tools available from obsidian-mcp. Exiting.")
-            return
-
-        openai_tools = [convert_mcp_tool_to_openai(t) for t in tools_result.tools]
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-
         ui.print_banner(vault_path, model)
 
         while True:
@@ -141,8 +135,36 @@ async def main_loop(config: dict):
             messages.append({"role": "user", "content": user_input})
 
             try:
-                reply = await run_turn(client_llm, model, messages, openai_tools, session)
+                reply = await run_turn(
+                    client_llm, model, messages, openai_tools, session, MAX_STEPS_CHAT
+                )
                 messages.append({"role": "assistant", "content": reply})
                 ui.print_agent_reply(reply)
             except Exception as e:
                 ui.print_error(str(e))
+
+
+async def run_once(config: dict, task_prompt: str):
+    """One-shot mode: connect, run a single task to completion (possibly
+    many tool calls), print the result, exit. Used by summarize/search/
+    tags/task commands."""
+    vault_path = config["vault_path"]
+    model = config["model"]
+    client_llm = build_llm_client(config["openrouter_api_key"])
+
+    async with AsyncExitStack() as stack:
+        with ui.console.status("[dim]connecting to vault...[/]"):
+            session, openai_tools = await connect_session(stack, vault_path)
+
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": task_prompt},
+        ]
+
+        try:
+            reply = await run_turn(
+                client_llm, model, messages, openai_tools, session, MAX_STEPS_ONE_SHOT
+            )
+            ui.print_agent_reply(reply)
+        except Exception as e:
+            ui.print_error(str(e))
