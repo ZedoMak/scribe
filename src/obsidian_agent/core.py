@@ -22,6 +22,14 @@ SYSTEM_PROMPT = (
     "after one or two attempts, don't keep retrying it — skip that note, "
     "note it in your final summary as something you couldn't resolve, and "
     "continue with the rest of the task."
+    "Trust the result of a successful tool call — if move_note_tool or "
+    "rename_note_tool reports success, the operation happened; do not "
+    "re-verify it more than once, and never use create_note_tool to "
+    "'recreate' or 'fix' a note that already exists elsewhere in the vault. "
+    "Never call any tool with overwrite=True unless the user explicitly "
+    "asked to replace that specific note's content. If you are ever unsure "
+    "whether an operation succeeded, stop and report the uncertainty to the "
+    "user instead of guessing or reconstructing content from memory."
 )
 
 TOOL_CALL_TIMEOUT_SECONDS = 30
@@ -59,13 +67,22 @@ def convert_mcp_tool_to_openai(tool) -> dict:
 
 async def execute_tool_call(tool_name: str, arguments: dict, session) -> str:
     try:
-        result = await session.call_tool(tool_name, arguments=arguments)
+        result = await asyncio.wait_for(
+            session.call_tool(tool_name, arguments=arguments),
+            timeout=TOOL_CALL_TIMEOUT_SECONDS,
+        )
         if result.content and len(result.content) > 0:
             return result.content[0].text
         return "Tool executed but returned no content."
+    except asyncio.TimeoutError:
+        return (
+            f"Error: '{tool_name}' timed out after {TOOL_CALL_TIMEOUT_SECONDS}s. "
+            "This operation may be too broad or slow — try a narrower query "
+            "(smaller max_results, more specific search terms), or skip it "
+            "and continue with the rest of the task."
+        )
     except Exception as e:
         return f"Error calling tool: {e}"
-
 
 async def connect_session(stack: AsyncExitStack, vault_path: str):
     """Start the obsidian-mcp subprocess and open an MCP session, kept

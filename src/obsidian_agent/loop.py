@@ -18,7 +18,7 @@ from .core import (
 # one-shot command like "reorganize my Projects folder" can legitimately
 # need many more tool calls than a chat turn answering one question.
 MAX_STEPS_CHAT = 10
-MAX_STEPS_ONE_SHOT = 25
+MAX_STEPS_ONE_SHOT = 40
 
 EXTRA_HEADERS = {
     "HTTP-Referer": "http://localhost:8080",
