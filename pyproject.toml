@@ -1,5 +1,5 @@
 [project]
-name = "scribe-cli"
+name = "scribe-agent"
 version = "0.3.0"
 description = "A conversational AI agent for your notes — Obsidian, Notion, and more — via MCP."
 readme = "README.md"
