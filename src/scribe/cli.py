@@ -74,10 +74,23 @@ def _make_backend_app(backend_name: str) -> typer.Typer:
         run_doctor(config, get_backend(backend_name))
 
     @backend_app.command(name="config")
-    def config_cmd(reset: bool = typer.Option(False, "--reset")):
+    def config_cmd(
+        reset: bool = typer.Option(False, "--reset"),
+        set_model: str | None = typer.Option(
+            None, "--set-model", help="Change the model without redoing full setup."
+        ),
+    ):
         """View or reset this backend's configuration."""
         if reset:
             load_config(backend_name, force_setup=True)
+            return
+        if set_model:
+            from .config import _read_raw_config, _write_raw_config
+
+            config = _read_raw_config()
+            config["model"] = set_model
+            _write_raw_config(config)
+            typer.echo(f"Model updated to: {set_model}")
             return
         typer.echo(f"Config file: {CONFIG_FILE}")
         if CONFIG_FILE.exists():
@@ -86,7 +99,6 @@ def _make_backend_app(backend_name: str) -> typer.Typer:
             typer.echo(f"No config yet — run 'scribe {backend_name} config --reset'.")
 
     return backend_app
-
 
 for _name in BACKENDS:
     app.add_typer(_make_backend_app(_name), name=_name)
